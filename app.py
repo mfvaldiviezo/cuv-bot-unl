@@ -10,10 +10,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 # ---------- CONFIGURACIÓN ----------
-TELEGRAM_TOKEN = "8736892730:AAHGEi63shXHKrDV5BpdGCfBKTsrM7LuN6A"  # Reemplaza con el token de BotFather
 SERVICE_ACCOUNT_FILE = "credentials.json"  # Ruta al archivo JSON descargado
 GOOGLE_DRIVE_FOLDER_ID = "179AB8FaDsN_SBZihxu5XMByBmNNDA0P-"  # ID de la carpeta raíz en Drive
+import os
 
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise ValueError("No se encontró TELEGRAM_TOKEN en las variables de entorno")
 # ----------------------------------
 
 # Diccionario para almacenar sesiones activas
@@ -21,7 +24,9 @@ user_sessions = {}
 
 # ---------- FUNCIONES DE GOOGLE DRIVE ----------
 def upload_photo_to_drive(file_path, file_name, student_name, date_str, tipo, timestamp):
-    creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE)
+    import json
+    creds_dict = json.loads(os.environ.get("GOOGLE_CREDENTIALS_JSON"))
+    creds = service_account.Credentials.from_service_account_info(creds_dict)
     drive_service = build('drive', 'v3', credentials=creds)
 
     # Ruta: Cálculo_Variable/Estudiante/Fecha/Tipo_HHMMSS/
