@@ -5,18 +5,21 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
-from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+from google.auth.transport.requests import Request as GoogleAuthRequest
 
 # ---------- CONFIGURACIÓN ----------
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_TOKEN no está configurado")
 
-GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-if not GOOGLE_CREDENTIALS_JSON:
-    raise ValueError("GOOGLE_CREDENTIALS_JSON no está configurado")
+OAUTH_CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID")
+OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET")
+OAUTH_REFRESH_TOKEN = os.environ.get("OAUTH_REFRESH_TOKEN")
+if not OAUTH_CLIENT_ID or not OAUTH_CLIENT_SECRET or not OAUTH_REFRESH_TOKEN:
+    raise ValueError("Faltan variables de entorno de OAuth (OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REFRESH_TOKEN)")
 
 GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
 if not GOOGLE_DRIVE_FOLDER_ID:
@@ -25,6 +28,23 @@ if not GOOGLE_DRIVE_FOLDER_ID:
 # Diccionario para almacenar sesiones de usuarios (en memoria)
 user_sessions = {}
 
+# ---------- FUNCIÓN DE AUTENTICACIÓN OAuth 2.0 ----------
+def get_authenticated_service():
+    """Construye y devuelve un servicio autenticado de Google Drive usando OAuth 2.0."""
+    creds = Credentials(
+        token=None,  # No necesitamos token inicial, usamos refresh_token
+        refresh_token=OAUTH_REFRESH_TOKEN,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=OAUTH_CLIENT_ID,
+        client_secret=OAUTH_CLIENT_SECRET,
+        scopes=["https://www.googleapis.com/auth/drive.file"]
+    )
+    # Si las credenciales están expiradas, las refrescamos automáticamente
+    if creds.expired:
+        creds.refresh(GoogleAuthRequest())
+    drive_service = build('drive', 'v3', credentials=creds)
+    return drive_service
+
 # ---------- FUNCIÓN DE SUBIDA A GOOGLE DRIVE ----------
 def upload_photo_to_drive(file_path, file_name, student_name, date_str, tipo, timestamp):
     """
@@ -32,11 +52,7 @@ def upload_photo_to_drive(file_path, file_name, student_name, date_str, tipo, ti
     /student_name/date_str/tipo_timestamp/file_name
     """
     try:
-        # Cargar credenciales desde la variable de entorno
-        creds_dict = json.loads(GOOGLE_CREDENTIALS_JSON)
-        creds = service_account.Credentials.from_service_account_info(creds_dict)
-        drive_service = build('drive', 'v3', credentials=creds)
-
+        drive_service = get_authenticated_service()
         # Construir ruta de carpetas
         folder_path = f"{student_name}/{date_str}/{tipo}_{timestamp}"
         parent_id = GOOGLE_DRIVE_FOLDER_ID
@@ -44,7 +60,9 @@ def upload_photo_to_drive(file_path, file_name, student_name, date_str, tipo, ti
         for folder in folder_path.split('/'):
             # Buscar si la carpeta ya existe
             query = f"name='{folder}' and mimeType='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
-            response = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
+            response = drive_service.files().list(
+                q=query, spaces='drive', fields='files(id, name)', supportsAllDrives=False
+            ).execute()
             folders = response.get('files', [])
             if folders:
                 parent_id = folders[0]['id']
@@ -55,13 +73,13 @@ def upload_photo_to_drive(file_path, file_name, student_name, date_str, tipo, ti
                     'mimeType': 'application/vnd.google-apps.folder',
                     'parents': [parent_id]
                 }
-                folder_obj = drive_service.files().create(body=file_metadata, fields='id').execute()
+                folder_obj = drive_service.files().create(body=file_metadata, fields='id', supportsAllDrives=False).execute()
                 parent_id = folder_obj['id']
 
         # Subir el archivo
         media = MediaFileUpload(file_path, mimetype='image/jpeg')
         file_metadata = {'name': file_name, 'parents': [parent_id]}
-        drive_service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+        drive_service.files().create(body=file_metadata, media_body=media, fields='id', supportsAllDrives=False).execute()
         print(f"✅ Subido a Drive: {folder_path}/{file_name}")
         return True
     except Exception as e:
@@ -132,7 +150,6 @@ async def recibir_contenido(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Primero selecciona tarea o actividad usando los botones.")
         return
 
-    # Determinar si es foto o documento imagen
     file = None
     extension = "jpg"
     if update.message.photo:
@@ -183,13 +200,14 @@ async def finalizar_entrega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏳ Subiendo {len(session['fotos'])} archivo(s) a Google Drive...")
 
     success_count = 0
+    total = len(session['fotos'])
     for idx, path in enumerate(session['fotos'], start=1):
         nombre_foto = f"pagina_{idx}.jpg"
         print(f"📤 Subiendo {path} -> {nombre_foto}")
         ok = upload_photo_to_drive(path, nombre_foto, estudiante, fecha_str, tipo, timestamp)
         if ok:
             success_count += 1
-        # Eliminar archivo temporal aunque falle
+        # Eliminar archivo temporal
         try:
             os.remove(path)
         except:
@@ -199,7 +217,7 @@ async def finalizar_entrega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session['fotos'] = []
     session['tipo'] = None
 
-    if success_count == len(session['fotos']):
+    if success_count == total:
         await update.message.reply_text(
             f"✅ *¡Entrega completa!*\n\n"
             f"Estudiante: {estudiante}\n"
@@ -212,7 +230,7 @@ async def finalizar_entrega(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             f"⚠️ *Entrega parcial*\n\n"
-            f"Se subieron {success_count} de {len(session['fotos'])} archivos.\n"
+            f"Se subieron {success_count} de {total} archivos.\n"
             f"Por favor intenta de nuevo.",
             parse_mode='Markdown'
         )
