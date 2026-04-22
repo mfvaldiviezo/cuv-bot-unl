@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: cuv-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:api --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: OAUTH_CLIENT_ID
+        sync: false
+      - key: OAUTH_CLIENT_SECRET
+        sync: false
+      - key: OAUTH_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_DRIVE_FOLDER_ID
+        sync: false
