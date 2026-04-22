@@ -13,17 +13,27 @@ if not DATABASE_URL:
 db_pool: Optional[asyncpg.Pool] = None
 
 async def init_db_pool():
-    """Inicializar pool de conexiones a Supabase"""
+    """Inicializar pool de conexiones a Supabase con retry"""
     global db_pool
     try:
+        # Parsear DATABASE_URL para asegurar sslmode
+        db_url = DATABASE_URL
+        if "sslmode" not in db_url:
+            separator = "&" if "?" in db_url else "?"
+            db_url = f"{db_url}{separator}sslmode=require"
+        
         db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
+            db_url,
             min_size=2,
             max_size=10,
             command_timeout=60,
-            ssl='require'  # Supabase requiere SSL
         )
         logger.info("✅ Pool de Supabase inicializado correctamente")
+    except OSError as e:
+        if "Network is unreachable" in str(e):
+            logger.error("❌ ERROR DE RED: Verifica que DATABASE_URL use Direct Connection (:5432), no Pooler (:6543)")
+            logger.error(f"   URL actual: {DATABASE_URL[:50]}...")  # Log parcial por seguridad
+        raise
     except Exception as e:
         logger.error(f"❌ Error inicializando Supabase: {e}", exc_info=True)
         raise
